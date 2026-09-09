@@ -45,5 +45,59 @@ $driveRoot = [IO.Path]::GetPathRoot($root)
 & pwsh -NoProfile -File (Join-Path $root 'modelready.ps1') uninstall -Profile base -EnvironmentRoot $driveRoot -DryRun -Yes -NoReport
 if ($LASTEXITCODE -eq 0) { throw 'uninstall 必须拒绝过于宽泛的环境根目录' }
 
+$previousStateRoot = $env:MODELREADY_STATE_ROOT
+$rollbackRoot = Join-Path $root 'reports\smoke-rollback'
+$rollbackState = Join-Path $rollbackRoot 'state'
+$rollbackTarget = Join-Path $rollbackRoot 'payload\environment'
+try {
+    $env:MODELREADY_STATE_ROOT = $rollbackState
+    New-Item -ItemType Directory -Path $rollbackTarget -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $rollbackTarget 'marker.txt') -Value 'temporary rollback fixture' -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path (Split-Path -Parent $rollbackTarget) 'user-file.txt') -Value 'must survive rollback' -Encoding ASCII
+    New-Item -ItemType Directory -Path $rollbackState -Force | Out-Null
+    $journal = [ordered]@{
+        schemaVersion = 1
+        productVersion = '0.4.0'
+        createdAt = (Get-Date).ToString('o')
+        modelReadyRoot = (Join-Path $env:LOCALAPPDATA 'ModelReady')
+        modelReadyRootCreated = $false
+        operations = @(
+            [ordered]@{
+                kind = 'empty-directory'; target = (Join-Path $rollbackRoot 'payload'); manager = ''
+                boundary = $rollbackRoot; details = ''; registeredAt = (Get-Date).ToString('o')
+            },
+            [ordered]@{
+                kind = 'environment'; target = $rollbackTarget; manager = ''
+                boundary = (Join-Path $rollbackRoot 'payload'); details = ''; registeredAt = (Get-Date).ToString('o')
+            }
+        )
+    }
+    $journal | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $rollbackState 'rollback-journal.json') -Encoding UTF8
+    & (Join-Path $root 'modelready.ps1') rollback -DryRun -Yes -NoReport
+    if (-not (Test-Path -LiteralPath $rollbackTarget)) { throw 'rollback -DryRun 不应删除测试目标' }
+    & (Join-Path $root 'modelready.ps1') rollback -Yes -NoReport
+    if (Test-Path -LiteralPath $rollbackTarget) { throw 'rollback 未删除日志内的测试目标' }
+    if (-not (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $rollbackTarget) 'user-file.txt'))) { throw 'rollback 不应删除用户后来加入的文件' }
+    if (Test-Path -LiteralPath (Join-Path $rollbackState 'rollback-journal.json')) { throw '成功回滚后应删除日志' }
+
+    New-Item -ItemType Directory -Path $rollbackState -Force | Out-Null
+    $unsafeJournal = [ordered]@{
+        schemaVersion = 1; productVersion = '0.4.0'; createdAt = (Get-Date).ToString('o')
+        modelReadyRoot = (Join-Path $env:LOCALAPPDATA 'ModelReady'); modelReadyRootCreated = $false
+        operations = @([ordered]@{
+            kind = 'directory'; target = $driveRoot; manager = ''; boundary = $driveRoot
+            details = ''; registeredAt = (Get-Date).ToString('o')
+        })
+    }
+    $unsafeJournal | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $rollbackState 'rollback-journal.json') -Encoding UTF8
+    & pwsh -NoProfile -File (Join-Path $root 'modelready.ps1') rollback -Yes -NoReport
+    if ($LASTEXITCODE -eq 0) { throw 'rollback 必须拒绝根目录目标' }
+    if (-not (Test-Path -LiteralPath (Join-Path $rollbackState 'rollback-journal.json'))) { throw '危险回滚被拒绝后必须保留日志' }
+} finally {
+    if ($null -eq $previousStateRoot) { Remove-Item Env:MODELREADY_STATE_ROOT -ErrorAction SilentlyContinue }
+    else { $env:MODELREADY_STATE_ROOT = $previousStateRoot }
+    if (Test-Path -LiteralPath $rollbackRoot) { Remove-Item -LiteralPath $rollbackRoot -Recurse -Force }
+}
+
 Write-Host 'ModelReady smoke tests passed.' -ForegroundColor Green
 $global:LASTEXITCODE = 0

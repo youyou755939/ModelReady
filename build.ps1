@@ -27,7 +27,7 @@ try {
     New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
     $files = @(
         'modelready.ps1', 'ModelReady.cmd', 'Install-ModelReady.cmd',
-        'Doctor-ModelReady.cmd', 'modelready.sh', 'README.md', 'CHANGELOG.md', 'SECURITY.md', 'LICENSE'
+        'Doctor-ModelReady.cmd', 'Rollback-ModelReady.cmd', 'modelready.sh', 'README.md', 'CHANGELOG.md', 'SECURITY.md', 'LICENSE'
     )
     foreach ($file in $files) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $packageRoot

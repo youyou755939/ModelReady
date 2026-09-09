@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('doctor', 'install', 'repair', 'verify', 'launch', 'uninstall', 'profiles', 'version')]
+    [ValidateSet('doctor', 'install', 'repair', 'verify', 'launch', 'uninstall', 'rollback', 'profiles', 'version')]
     [string]$Command = 'doctor',
 
     [ValidateSet('base', 'optimization', 'ml', 'paper', 'full')]
@@ -38,6 +38,7 @@ try {
         'verify'  { Invoke-ModelReadyVerify @options }
         'launch'  { Start-ModelReadyJupyter @options }
         'uninstall' { Uninstall-ModelReadyEnvironment @options }
+        'rollback' { Invoke-ModelReadyRollback @options }
         'profiles' { Show-ModelReadyProfiles -ProjectRoot $projectRoot }
         'version' { Show-ModelReadyVersion -ProjectRoot $projectRoot }
     }

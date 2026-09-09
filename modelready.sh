@@ -10,7 +10,9 @@ COMMAND="doctor"
 PROFILE="base"
 SOURCE="official"
 ENVIRONMENT_ROOT="${XDG_DATA_HOME:-${USER_HOME}/.local/share}/modelready/envs"
-REPORT_ROOT="${XDG_STATE_HOME:-${USER_HOME}/.local/state}/modelready/reports"
+STATE_ROOT="${MODELREADY_STATE_ROOT:-${XDG_STATE_HOME:-${USER_HOME}/.local/state}/modelready}"
+REPORT_ROOT="$STATE_ROOT/reports"
+JOURNAL_PATH="$STATE_ROOT/rollback-journal.tsv"
 DRY_RUN=false
 ASSUME_YES=false
 NO_REPORT=false
@@ -29,6 +31,7 @@ Commands:
   verify      Run reproducible functional checks
   launch      Start JupyterLab from the selected profile
   uninstall   Remove only the selected Python environment
+  rollback    Revert every change recorded during ModelReady 0.4+ installs
   profiles    List available profiles
   version     Print the ModelReady version
 
@@ -61,11 +64,32 @@ while (($# > 0)); do
   esac
 done
 
-case "$COMMAND" in doctor|install|repair|verify|launch|uninstall|profiles|version) ;; *) echo "Unknown command: $COMMAND" >&2; exit 2 ;; esac
+case "$COMMAND" in doctor|install|repair|verify|launch|uninstall|rollback|profiles|version) ;; *) echo "Unknown command: $COMMAND" >&2; exit 2 ;; esac
 case "$PROFILE" in base|optimization|ml|paper|full) ;; *) echo "Unknown profile: $PROFILE" >&2; exit 2 ;; esac
 case "$SOURCE" in official|china) ;; *) echo "Unknown source: $SOURCE" >&2; exit 2 ;; esac
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+initialize_journal() {
+  if [[ -e "$JOURNAL_PATH" ]]; then return 0; fi
+  mkdir -p -- "$STATE_ROOT" || return 1
+  printf '# ModelReady rollback journal v1\n' >"$JOURNAL_PATH"
+}
+
+journal_register() {
+  local kind="$1" manager="$2" target="$3" boundary="$4"
+  [[ "$DRY_RUN" == true ]] && return 0
+  if [[ "$kind$manager$target$boundary" == *$'\t'* || "$kind$manager$target$boundary" == *$'\n'* ]]; then
+    echo 'ModelReady failed: rollback journal values cannot contain tabs or newlines.' >&2
+    return 1
+  fi
+  initialize_journal || return 1
+  if awk -F '\t' -v k="$kind" -v m="$manager" -v t="$target" -v b="$boundary" \
+      'NF >= 4 && $1 == k && $2 == m && $3 == t && $4 == b {found=1} END {exit !found}' "$JOURNAL_PATH"; then
+    return 0
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$kind" "$manager" "$target" "$boundary" >>"$JOURNAL_PATH"
+}
 
 run_command() {
   printf '> '
@@ -222,7 +246,16 @@ apt_packages() {
 install_system_packages() {
   mapfile -t packages < <(apt_packages)
   run_privileged apt-get update || return 1
-  run_privileged apt-get install -y --no-install-recommends "${packages[@]}"
+  if [[ "$DRY_RUN" != true ]]; then
+    local simulation package
+    simulation="$(LC_ALL=C apt-get -s install -y --no-upgrade --no-install-recommends "${packages[@]}")" || return 1
+    while IFS= read -r package; do
+      if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -qx 'install ok installed'; then
+        journal_register apt-package apt "$package" / || return 1
+      fi
+    done < <(awk '/^Inst / {print $2}' <<<"$simulation" | sort -u)
+  fi
+  run_privileged apt-get install -y --no-upgrade --no-install-recommends "${packages[@]}"
 }
 
 resolve_uv() {
@@ -245,6 +278,12 @@ resolve_uv() {
     return 1
   fi
   echo 'uv installer SHA-256 verified.' >&2
+  local standalone_root="${USER_HOME}/.local" standalone_bin="${USER_HOME}/.local/bin" path
+  if [[ ! -e "$standalone_root" ]]; then journal_register empty-directory none "$standalone_root" "$USER_HOME" || return 1; fi
+  if [[ ! -e "$standalone_bin" ]]; then journal_register empty-directory none "$standalone_bin" "$standalone_root" || return 1; fi
+  for path in "$standalone_bin/uv" "$standalone_bin/uvx" "$standalone_bin/uvw"; do
+    if [[ ! -e "$path" ]]; then journal_register file none "$path" "$standalone_bin" || return 1; fi
+  done
   env UV_NO_MODIFY_PATH=1 sh "$temporary_installer" >&2
   local installer_status=$?
   rm -f -- "$temporary_installer"
@@ -273,29 +312,48 @@ install_profile() {
     return 0
   fi
   local uv_command python_version environment environment_python index_url lock_path product_version
+  local modelready_data_root python_install_root uv_cache_root environment_parent
   uv_command="$(resolve_uv)" || return 1
   python_version="$(manifest_value python-version)"
   product_version="$(manifest_value version)"
   environment="$ENVIRONMENT_ROOT/$PROFILE"
   environment_python="$environment/bin/python"
+  modelready_data_root="${XDG_DATA_HOME:-${USER_HOME}/.local/share}/modelready"
+  python_install_root="$modelready_data_root/python"
+  uv_cache_root="${XDG_CACHE_HOME:-${USER_HOME}/.cache}/modelready/uv"
   index_url='https://pypi.org/simple'
   if [[ "$SOURCE" == china ]]; then index_url='https://pypi.tuna.tsinghua.edu.cn/simple'; fi
   mapfile -t python_packages < <(manifest_value packages)
   if ((${#python_packages[@]} == 0)); then echo 'ModelReady failed: profile contains no Python packages.' >&2; return 1; fi
 
-  run_command "$uv_command" python install "$python_version" || return 1
+  if [[ "$DRY_RUN" != true ]]; then
+    if [[ ! -e "$modelready_data_root" ]]; then journal_register empty-directory none "$modelready_data_root" "${XDG_DATA_HOME:-${USER_HOME}/.local/share}" || return 1; fi
+    if [[ ! -e "$python_install_root" ]]; then journal_register directory none "$python_install_root" "$modelready_data_root" || return 1; fi
+    if [[ ! -e "${XDG_CACHE_HOME:-${USER_HOME}/.cache}/modelready" ]]; then
+      journal_register empty-directory none "${XDG_CACHE_HOME:-${USER_HOME}/.cache}/modelready" "${XDG_CACHE_HOME:-${USER_HOME}/.cache}" || return 1
+    fi
+    if [[ ! -e "$uv_cache_root" ]]; then journal_register directory none "$uv_cache_root" "${XDG_CACHE_HOME:-${USER_HOME}/.cache}/modelready" || return 1; fi
+  fi
+  run_command env UV_PYTHON_INSTALL_DIR="$python_install_root" UV_CACHE_DIR="$uv_cache_root" "$uv_command" python install "$python_version" || return 1
   if [[ "$DRY_RUN" == true || ! -x "$environment_python" ]]; then
-    run_command "$uv_command" venv --python "$python_version" "$environment" || return 1
+    if [[ "$DRY_RUN" != true && ! -e "$environment" ]]; then
+      environment_parent="$(dirname -- "$ENVIRONMENT_ROOT")"
+      if [[ ! -e "$ENVIRONMENT_ROOT" && "$environment_parent" != / ]]; then
+        journal_register empty-directory none "$ENVIRONMENT_ROOT" "$environment_parent" || return 1
+      fi
+      journal_register environment none "$environment" "$ENVIRONMENT_ROOT" || return 1
+    fi
+    run_command env UV_PYTHON_INSTALL_DIR="$python_install_root" UV_CACHE_DIR="$uv_cache_root" "$uv_command" venv --python "$python_version" "$environment" || return 1
   else
     echo "[SKIP] Environment already exists: $environment"
   fi
-  run_command "$uv_command" pip install --python "$environment_python" --index-url "$index_url" "${python_packages[@]}" || return 1
+  run_command env UV_PYTHON_INSTALL_DIR="$python_install_root" UV_CACHE_DIR="$uv_cache_root" "$uv_command" pip install --python "$environment_python" --index-url "$index_url" "${python_packages[@]}" || return 1
   if [[ "$DRY_RUN" == true ]]; then
     echo "[DRY-RUN] write exact package list: $environment/modelready.lock.txt"
     return 0
   fi
   lock_path="$environment/modelready.lock.txt"
-  "$uv_command" pip freeze --python "$environment_python" >"$lock_path" || return 1
+  env UV_PYTHON_INSTALL_DIR="$python_install_root" UV_CACHE_DIR="$uv_cache_root" "$uv_command" pip freeze --python "$environment_python" >"$lock_path" || return 1
   python3 "$PROJECT_ROOT/scripts/write_install_state.py" --path "$environment/modelready-installation.json" \
     --product-version "$product_version" --profile "$PROFILE" --source "$SOURCE" \
     --python-version "$python_version" --environment "$environment" --lock-file "$lock_path" || return 1
@@ -358,6 +416,94 @@ uninstall_profile() {
   echo 'System packages were not removed.'
 }
 
+safe_tracked_target() {
+  local target_full boundary_full
+  target_full="$(realpath -m -- "$1")" || return 1
+  boundary_full="$(realpath -m -- "$2")" || return 1
+  [[ "$boundary_full" != / && "$target_full" != "$boundary_full" && "$target_full" == "$boundary_full/"* ]]
+}
+
+rollback_all() {
+  if [[ ! -f "$JOURNAL_PATH" ]]; then
+    echo 'No ModelReady 0.4+ rollback journal exists; nothing was changed.'
+    return 0
+  fi
+  mapfile -t rollback_entries < <(grep -v '^#' "$JOURNAL_PATH")
+  if ((${#rollback_entries[@]} == 0)); then
+    rm -f -- "$JOURNAL_PATH"
+    rmdir -- "$STATE_ROOT" 2>/dev/null || true
+    echo 'Rollback journal was empty and has been cleaned; nothing else was changed.'
+    return 0
+  fi
+  echo "ModelReady will reverse ${#rollback_entries[@]} recorded change(s):"
+  local entry kind manager target boundary
+  for ((index=${#rollback_entries[@]}-1; index>=0; index--)); do
+    IFS=$'\t' read -r kind manager target boundary <<<"${rollback_entries[index]}"
+    printf '  - %s: %s\n' "$kind" "$target"
+  done
+  if [[ "$DRY_RUN" == true ]]; then echo '[DRY-RUN] rollback plan only; no changes were made.'; return 0; fi
+  if [[ "$ASSUME_YES" != true ]]; then
+    read -r -p 'Remove recorded environments and packages? Type ROLLBACK: ' answer
+    if [[ "$answer" != ROLLBACK ]]; then echo 'Rollback cancelled.' >&2; return 1; fi
+  fi
+
+  local apt_packages_to_remove=() proposed package known
+  for entry in "${rollback_entries[@]}"; do
+    IFS=$'\t' read -r kind manager target boundary <<<"$entry"
+    case "$kind" in
+      apt-package)
+        if [[ "$manager" != apt || ! "$target" =~ ^[a-z0-9][a-z0-9+.-]*(:[a-z0-9]+)?$ ]]; then
+          echo "ModelReady refused invalid APT rollback entry '$target'. Journal retained." >&2
+          return 1
+        fi
+        apt_packages_to_remove+=("$target")
+        ;;
+      file|directory|empty-directory|environment)
+        if ! safe_tracked_target "$target" "$boundary"; then
+          echo "Unsafe rollback path rejected: $target (boundary: $boundary). Journal retained." >&2
+          return 1
+        fi
+        ;;
+      *) echo "Unknown rollback operation '$kind'; journal retained." >&2; return 1 ;;
+    esac
+  done
+  if ((${#apt_packages_to_remove[@]} > 0)); then
+    proposed="$(LC_ALL=C apt-get -s purge -y "${apt_packages_to_remove[@]}")" || { echo 'ModelReady failed: apt rollback simulation failed; journal retained.' >&2; return 1; }
+    while IFS= read -r package; do
+      known=false
+      for target in "${apt_packages_to_remove[@]}"; do [[ "$package" == "$target" ]] && known=true; done
+      if [[ "$known" != true ]]; then
+        echo "ModelReady refused apt rollback: it would also remove unrecorded package '$package'. Journal retained." >&2
+        return 1
+      fi
+    done < <(awk '/^Remv / {print $2}' <<<"$proposed" | sort -u)
+  fi
+
+  local failures=0
+  for ((index=${#rollback_entries[@]}-1; index>=0; index--)); do
+    IFS=$'\t' read -r kind manager target boundary <<<"${rollback_entries[index]}"
+    if [[ "$kind" == apt-package ]]; then continue; fi
+    if [[ "$kind" != file && "$kind" != directory && "$kind" != empty-directory && "$kind" != environment ]]; then
+      echo "Unknown rollback operation '$kind'; journal retained." >&2; failures=$((failures + 1)); continue
+    fi
+    if ! safe_tracked_target "$target" "$boundary"; then
+      echo "Unsafe rollback path rejected: $target (boundary: $boundary)" >&2; failures=$((failures + 1)); continue
+    fi
+    if [[ "$kind" == empty-directory ]]; then
+      if [[ -d "$target" ]]; then rmdir -- "$target" 2>/dev/null || true; fi
+    elif [[ -e "$target" || -L "$target" ]]; then
+      rm -rf -- "$target" || failures=$((failures + 1))
+    fi
+  done
+  if ((${#apt_packages_to_remove[@]} > 0)); then
+    run_privileged apt-get purge -y "${apt_packages_to_remove[@]}" || failures=$((failures + 1))
+  fi
+  if ((failures > 0)); then echo "ModelReady rollback had $failures failure(s); journal retained for retry." >&2; return 1; fi
+  rm -f -- "$JOURNAL_PATH"
+  rmdir -- "$STATE_ROOT" 2>/dev/null || true
+  echo 'All recorded ModelReady environment changes were rolled back; pre-existing software and user files were untouched.'
+}
+
 show_profiles() {
   if command_exists python3; then
     python3 - "$MANIFEST" <<'PY'
@@ -374,7 +520,7 @@ PY
 
 show_version() {
   if command_exists python3; then echo "ModelReady $(manifest_value version)"
-  else echo 'ModelReady 0.3.0'; fi
+  else echo 'ModelReady 0.4.0'; fi
 }
 
 case "$COMMAND" in
@@ -383,6 +529,7 @@ case "$COMMAND" in
   verify) verify_profile ;;
   launch) launch_profile ;;
   uninstall) uninstall_profile ;;
+  rollback) rollback_all ;;
   profiles) show_profiles ;;
   version) show_version ;;
 esac

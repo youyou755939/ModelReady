@@ -6,6 +6,75 @@ function Get-ModelReadyManifest {
     Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+function Get-RollbackJournalPath {
+    $stateRoot = if ($env:MODELREADY_STATE_ROOT) {
+        [IO.Path]::GetFullPath($env:MODELREADY_STATE_ROOT)
+    } else {
+        Join-Path $env:LOCALAPPDATA 'ModelReady\state'
+    }
+    Join-Path $stateRoot 'rollback-journal.json'
+}
+
+function Initialize-RollbackJournal {
+    param([string]$ProductVersion)
+    $path = Get-RollbackJournalPath
+    if (Test-Path -LiteralPath $path) { return $path }
+    $modelReadyRoot = Join-Path $env:LOCALAPPDATA 'ModelReady'
+    $modelReadyRootCreated = -not (Test-Path -LiteralPath $modelReadyRoot)
+    $parent = Split-Path -Parent $path
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $journal = [ordered]@{
+        schemaVersion = 1
+        productVersion = $ProductVersion
+        createdAt = (Get-Date).ToString('o')
+        modelReadyRoot = $modelReadyRoot
+        modelReadyRootCreated = $modelReadyRootCreated
+        operations = @()
+    }
+    $journal | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
+    $path
+}
+
+function Register-RollbackOperation {
+    param(
+        [Parameter(Mandatory)][string]$JournalPath,
+        [Parameter(Mandatory)][string]$Kind,
+        [Parameter(Mandatory)][string]$Target,
+        [string]$Manager = '',
+        [string]$Boundary = '',
+        [string]$Details = ''
+    )
+    $journal = Get-Content -LiteralPath $JournalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $duplicate = @($journal.operations | Where-Object { $_.kind -eq $Kind -and $_.target -eq $Target }).Count -gt 0
+    if ($duplicate) { return }
+    $operation = [pscustomobject]@{
+        kind = $Kind
+        target = $Target
+        manager = $Manager
+        boundary = $Boundary
+        details = $Details
+        registeredAt = (Get-Date).ToString('o')
+    }
+    $journal.operations = @($journal.operations) + @($operation)
+    $journal | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $JournalPath -Encoding UTF8
+}
+
+function Test-WingetPackageInstalled {
+    param([string]$WingetPath, [string]$PackageId)
+    & $WingetPath list '--id' $PackageId '--exact' '--source' 'winget' '--disable-interactivity' *> $null
+    $LASTEXITCODE -eq 0
+}
+
+function Test-SafeTrackedTarget {
+    param([Parameter(Mandatory)][string]$Target, [Parameter(Mandatory)][string]$Boundary)
+    $targetFull = [IO.Path]::GetFullPath($Target).TrimEnd('\', '/')
+    $boundaryFull = [IO.Path]::GetFullPath($Boundary).TrimEnd('\', '/')
+    $boundaryRoot = [IO.Path]::GetPathRoot($boundaryFull).TrimEnd('\', '/')
+    if (-not $boundaryFull -or $boundaryFull -eq $boundaryRoot -or $targetFull -eq $boundaryFull) { return $false }
+    $prefix = $boundaryFull + [IO.Path]::DirectorySeparatorChar
+    $targetFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-ProfileClosure {
     param($Manifest, [string]$Profile)
     $seen = [ordered]@{}
@@ -189,7 +258,7 @@ function Confirm-Install {
 }
 
 function Resolve-UvCommand {
-    param([bool]$DryRun, [string]$Version, [string]$ExpectedSha256)
+    param([bool]$DryRun, [string]$Version, [string]$ExpectedSha256, [string]$JournalPath)
     function Find-Uv {
         $command = Get-Command uv -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($command) { return $command.Source }
@@ -208,6 +277,9 @@ function Resolve-UvCommand {
 
     $winget = Get-Command winget -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($winget) {
+        if (-not $DryRun -and -not (Test-WingetPackageInstalled $winget.Source 'astral-sh.uv')) {
+            Register-RollbackOperation $JournalPath 'system-package' 'astral-sh.uv' 'winget'
+        }
         Invoke-External $winget.Source @('install', '--id', 'astral-sh.uv', '--exact', '--accept-source-agreements', '--accept-package-agreements') $DryRun | Out-Null
         if ($DryRun) { return [pscustomobject]@{ File = 'uv'; Prefix = @() } }
         $uvPath = Find-Uv
@@ -223,7 +295,29 @@ function Resolve-UvCommand {
             return [pscustomobject]@{ File = 'uv'; Prefix = @() }
         }
         $temporaryInstaller = Join-Path ([System.IO.Path]::GetTempPath()) "modelready-uv-$Version-install.ps1"
+        $standaloneBin = Join-Path $env:USERPROFILE '.local\bin'
+        if (-not $DryRun) {
+            $standaloneRoot = Split-Path -Parent $standaloneBin
+            if (-not (Test-Path -LiteralPath $standaloneRoot)) {
+                Register-RollbackOperation $JournalPath 'empty-directory' $standaloneRoot '' $env:USERPROFILE
+            }
+            if (-not (Test-Path -LiteralPath $standaloneBin)) {
+                Register-RollbackOperation $JournalPath 'empty-directory' $standaloneBin '' $standaloneRoot
+            }
+            foreach ($name in @('uv.exe', 'uvx.exe', 'uvw.exe')) {
+                $binaryPath = Join-Path $standaloneBin $name
+                if (-not (Test-Path -LiteralPath $binaryPath)) {
+                    Register-RollbackOperation $JournalPath 'file' $binaryPath '' $standaloneBin
+                }
+            }
+            foreach ($directoryPath in @((Join-Path $env:LOCALAPPDATA 'uv'), (Join-Path $env:APPDATA 'uv'))) {
+                if (-not (Test-Path -LiteralPath $directoryPath)) {
+                    Register-RollbackOperation $JournalPath 'directory' $directoryPath '' (Split-Path -Parent $directoryPath)
+                }
+            }
+        }
         Write-Host "> 下载官方 uv $Version 安装脚本" -ForegroundColor DarkCyan
+        $previousNoModifyPath = $null
         try {
             Invoke-WebRequest -Uri $installerUrl -OutFile $temporaryInstaller -UseBasicParsing
             $actualSha256 = (Get-FileHash -LiteralPath $temporaryInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -231,14 +325,24 @@ function Resolve-UvCommand {
                 throw "uv 安装脚本 SHA-256 不匹配；期望 $ExpectedSha256，实际 $actualSha256。已拒绝执行。"
             }
             Write-Host "uv 安装脚本 SHA-256 验证通过。" -ForegroundColor Green
+            $previousNoModifyPath = $env:UV_NO_MODIFY_PATH
+            $env:UV_NO_MODIFY_PATH = '1'
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $temporaryInstaller
             if ($LASTEXITCODE -ne 0) { throw "uv 官方安装程序失败（退出码 $LASTEXITCODE）" }
         } finally {
+            if ($null -eq $previousNoModifyPath) { Remove-Item Env:UV_NO_MODIFY_PATH -ErrorAction SilentlyContinue }
+            else { $env:UV_NO_MODIFY_PATH = $previousNoModifyPath }
             if (Test-Path -LiteralPath $temporaryInstaller) { Remove-Item -LiteralPath $temporaryInstaller -Force }
         }
         $uvPath = Find-Uv
         if ($uvPath) { return [pscustomobject]@{ File = $uvPath; Prefix = @() } }
         throw 'uv 安装程序已结束，但未找到 uv.exe。请重新打开 PowerShell 后重试。'
+    }
+    if (-not $DryRun) {
+        & $launcher.Path -m pip show uv *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Register-RollbackOperation $JournalPath 'python-package' 'uv' 'pip-user' '' $launcher.Path
+        }
     }
     Invoke-External $launcher.Path @('-m', 'pip', 'install', '--user', 'uv') $DryRun | Out-Null
     if ($DryRun) { return [pscustomobject]@{ File = $launcher.Path; Prefix = @('-m', 'uv') } }
@@ -248,7 +352,7 @@ function Resolve-UvCommand {
 }
 
 function Install-SystemTools {
-    param($Manifest, [string[]]$ToolNames, [bool]$DryRun)
+    param($Manifest, [string[]]$ToolNames, [bool]$DryRun, [string]$JournalPath)
     if ($ToolNames.Count -eq 0) { return }
     $winget = Get-Command winget -ErrorAction SilentlyContinue | Select-Object -First 1
     foreach ($toolName in $ToolNames) {
@@ -259,6 +363,9 @@ function Install-SystemTools {
         if (-not $winget) {
             Write-Warning "$toolName 未安装，且未找到 winget。请安装 Windows App Installer 后重试。建议包：$($spec.wingetId)"
             continue
+        }
+        if (-not $DryRun -and -not (Test-WingetPackageInstalled $winget.Source ([string]$spec.wingetId))) {
+            Register-RollbackOperation $JournalPath 'system-package' ([string]$spec.wingetId) 'winget'
         }
         Invoke-External $winget.Source @('install', '--id', [string]$spec.wingetId, '--exact', '--accept-source-agreements', '--accept-package-agreements') $DryRun | Out-Null
     }
@@ -349,47 +456,80 @@ function Invoke-ModelReadyInstall {
     Confirm-Install $Yes $DryRun $Profile
     $manifest = Get-ModelReadyManifest $ProjectRoot
     $requirements = Get-ProfileRequirements $manifest $Profile
+    $journalPath = if ($DryRun) { '' } else { Initialize-RollbackJournal ([string]$manifest.productVersion) }
     Write-Host "配置档：$Profile；Python 包：$($requirements.PythonPackages.Count)；系统工具：$($requirements.SystemTools.Count)"
-    Install-SystemTools $manifest $requirements.SystemTools $DryRun
+    Install-SystemTools $manifest $requirements.SystemTools $DryRun $journalPath
     if (-not $DryRun) { Update-ProcessPath }
 
-    $uv = Resolve-UvCommand -DryRun $DryRun -Version ([string]$manifest.uvVersion) -ExpectedSha256 ([string]$manifest.uvInstallerSha256)
+    $uv = Resolve-UvCommand -DryRun $DryRun -Version ([string]$manifest.uvVersion) -ExpectedSha256 ([string]$manifest.uvInstallerSha256) -JournalPath $journalPath
     $environment = Join-Path $EnvironmentRoot $Profile
     $pythonVersion = [string]$manifest.pythonVersion
-    Invoke-External $uv.File (@($uv.Prefix) + @('python', 'install', $pythonVersion)) $DryRun | Out-Null
-    $environmentPython = Join-Path $environment 'Scripts\python.exe'
-    if ($DryRun -or -not (Test-Path -LiteralPath $environmentPython)) {
-        Invoke-External $uv.File (@($uv.Prefix) + @('venv', '--python', $pythonVersion, $environment)) $DryRun | Out-Null
-    } else {
-        Write-Host "[SKIP] 隔离环境已存在：$environment"
+    $modelReadyDataRoot = Join-Path $env:LOCALAPPDATA 'ModelReady'
+    $pythonInstallRoot = Join-Path $modelReadyDataRoot 'python'
+    $uvCacheRoot = Join-Path $modelReadyDataRoot 'cache\uv'
+    if (-not $DryRun) {
+        $uvCacheParent = Split-Path -Parent $uvCacheRoot
+        if (-not (Test-Path -LiteralPath $uvCacheParent)) {
+            Register-RollbackOperation $journalPath 'empty-directory' $uvCacheParent '' $modelReadyDataRoot
+        }
+        foreach ($directoryPath in @($pythonInstallRoot, $uvCacheRoot)) {
+            if (-not (Test-Path -LiteralPath $directoryPath)) {
+                Register-RollbackOperation $journalPath 'directory' $directoryPath '' $modelReadyDataRoot
+            }
+        }
     }
+    $previousPythonRoot = $env:UV_PYTHON_INSTALL_DIR
+    $previousCacheRoot = $env:UV_CACHE_DIR
+    $env:UV_PYTHON_INSTALL_DIR = $pythonInstallRoot
+    $env:UV_CACHE_DIR = $uvCacheRoot
+    try {
+        Invoke-External $uv.File (@($uv.Prefix) + @('python', 'install', $pythonVersion)) $DryRun | Out-Null
+        $environmentPython = Join-Path $environment 'Scripts\python.exe'
+        if ($DryRun -or -not (Test-Path -LiteralPath $environmentPython)) {
+            if (-not $DryRun -and -not (Test-Path -LiteralPath $environment)) {
+                $environmentParent = Split-Path -Parent ([IO.Path]::GetFullPath($EnvironmentRoot))
+                if (-not (Test-Path -LiteralPath $EnvironmentRoot) -and (Test-SafeTrackedTarget $EnvironmentRoot $environmentParent)) {
+                    Register-RollbackOperation $journalPath 'empty-directory' $EnvironmentRoot '' $environmentParent
+                }
+                Register-RollbackOperation $journalPath 'environment' $environment '' $EnvironmentRoot
+            }
+            Invoke-External $uv.File (@($uv.Prefix) + @('venv', '--python', $pythonVersion, $environment)) $DryRun | Out-Null
+        } else {
+            Write-Host "[SKIP] 隔离环境已存在：$environment"
+        }
 
-    $indexUrl = [string]$manifest.indexUrls.$Source
-    $arguments = @($uv.Prefix) + @('pip', 'install', '--python', $environmentPython, '--index-url', $indexUrl) + @($requirements.PythonPackages)
-    Invoke-External $uv.File $arguments $DryRun | Out-Null
+        $indexUrl = [string]$manifest.indexUrls.$Source
+        $arguments = @($uv.Prefix) + @('pip', 'install', '--python', $environmentPython, '--index-url', $indexUrl) + @($requirements.PythonPackages)
+        Invoke-External $uv.File $arguments $DryRun | Out-Null
 
-    if ($DryRun) {
-        Write-Host "[DRY-RUN] 生成精确版本清单：$(Join-Path $environment 'modelready.lock.txt')" -ForegroundColor Cyan
-        Write-Host '预演完成：未修改系统。' -ForegroundColor Cyan
-        return
+        if ($DryRun) {
+            Write-Host "[DRY-RUN] 生成精确版本清单：$(Join-Path $environment 'modelready.lock.txt')" -ForegroundColor Cyan
+            Write-Host '预演完成：未修改系统。' -ForegroundColor Cyan
+            return
+        }
+        $lockPath = Join-Path $environment 'modelready.lock.txt'
+        $freezeArguments = @($uv.Prefix) + @('pip', 'freeze', '--python', $environmentPython)
+        & $uv.File @freezeArguments | Set-Content -LiteralPath $lockPath -Encoding UTF8
+        if ($LASTEXITCODE -ne 0) { throw "无法生成精确版本清单：$lockPath" }
+        Write-Host "精确版本清单：$lockPath"
+        $installationState = [ordered]@{
+            schemaVersion = 1
+            productVersion = [string]$manifest.productVersion
+            installedAt = (Get-Date).ToString('o')
+            profile = $Profile
+            source = $Source
+            pythonVersion = $pythonVersion
+            environment = $environment
+            lockFile = $lockPath
+        }
+        $installationState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $environment 'modelready-installation.json') -Encoding UTF8
+        Invoke-ModelReadyVerify -ProjectRoot $ProjectRoot -Profile $Profile -Source $Source -EnvironmentRoot $EnvironmentRoot -DryRun:$false -Yes:$true -NoReport:$NoReport
+    } finally {
+        if ($null -eq $previousPythonRoot) { Remove-Item Env:UV_PYTHON_INSTALL_DIR -ErrorAction SilentlyContinue }
+        else { $env:UV_PYTHON_INSTALL_DIR = $previousPythonRoot }
+        if ($null -eq $previousCacheRoot) { Remove-Item Env:UV_CACHE_DIR -ErrorAction SilentlyContinue }
+        else { $env:UV_CACHE_DIR = $previousCacheRoot }
     }
-    $lockPath = Join-Path $environment 'modelready.lock.txt'
-    $freezeArguments = @($uv.Prefix) + @('pip', 'freeze', '--python', $environmentPython)
-    & $uv.File @freezeArguments | Set-Content -LiteralPath $lockPath -Encoding UTF8
-    if ($LASTEXITCODE -ne 0) { throw "无法生成精确版本清单：$lockPath" }
-    Write-Host "精确版本清单：$lockPath"
-    $installationState = [ordered]@{
-        schemaVersion = 1
-        productVersion = [string]$manifest.productVersion
-        installedAt = (Get-Date).ToString('o')
-        profile = $Profile
-        source = $Source
-        pythonVersion = $pythonVersion
-        environment = $environment
-        lockFile = $lockPath
-    }
-    $installationState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $environment 'modelready-installation.json') -Encoding UTF8
-    Invoke-ModelReadyVerify -ProjectRoot $ProjectRoot -Profile $Profile -Source $Source -EnvironmentRoot $EnvironmentRoot -DryRun:$false -Yes:$true -NoReport:$NoReport
 }
 
 function Start-ModelReadyJupyter {
@@ -434,6 +574,137 @@ function Uninstall-ModelReadyEnvironment {
     Remove-Item -LiteralPath $targetFull -Recurse -Force
     Write-Host "已删除隔离环境：$targetFull" -ForegroundColor Green
     Write-Host '系统级工具（Pandoc、Graphviz、LaTeX）未被删除。'
+}
+
+function Invoke-ModelReadyRollback {
+    [CmdletBinding()]
+    param([string]$ProjectRoot, [string]$Profile, [string]$Source, [string]$EnvironmentRoot, [bool]$DryRun, [bool]$Yes, [bool]$NoReport)
+    $journalPath = Get-RollbackJournalPath
+    if (-not (Test-Path -LiteralPath $journalPath)) {
+        Write-Host '没有可撤回的 ModelReady 0.4+ 安装记录；未对电脑进行任何修改。'
+        return
+    }
+    $journal = Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $operations = @($journal.operations)
+    if ($operations.Count -eq 0) {
+        Remove-Item -LiteralPath $journalPath -Force
+        $emptyStateDirectory = Split-Path -Parent $journalPath
+        $emptyStateRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($emptyStateDirectory)).TrimEnd('\', '/')
+        if ([IO.Path]::GetFullPath($emptyStateDirectory).TrimEnd('\', '/') -ne $emptyStateRoot -and
+            (Test-Path -LiteralPath $emptyStateDirectory) -and
+            -not (Get-ChildItem -LiteralPath $emptyStateDirectory -Force | Select-Object -First 1)) {
+            Remove-Item -LiteralPath $emptyStateDirectory -Force
+        }
+        $expectedModelReadyRoot = Join-Path $env:LOCALAPPDATA 'ModelReady'
+        if ($journal.modelReadyRootCreated -eq $true -and
+            ([string]$journal.modelReadyRoot -eq $expectedModelReadyRoot) -and
+            (Test-Path -LiteralPath $expectedModelReadyRoot) -and
+            -not (Get-ChildItem -LiteralPath $expectedModelReadyRoot -Force | Select-Object -First 1)) {
+            Remove-Item -LiteralPath $expectedModelReadyRoot -Force
+        }
+        Write-Host '撤回日志为空；已清理日志，未修改其他电脑环境。'
+        return
+    }
+    Write-Host "将按相反顺序撤回 $($operations.Count) 项由 ModelReady 记录的修改：" -ForegroundColor Yellow
+    for ($index = $operations.Count - 1; $index -ge 0; $index--) {
+        $operation = $operations[$index]
+        Write-Host "  - $($operation.kind): $($operation.target)"
+    }
+    if ($DryRun) {
+        Write-Host '[DRY-RUN] 仅展示撤回计划，未修改系统。' -ForegroundColor Cyan
+        return
+    }
+    if (-not $Yes) {
+        $answer = Read-Host '将删除记录的隔离环境，并卸载仅由 ModelReady 新增的软件。输入 ROLLBACK 继续'
+        if ($answer -cne 'ROLLBACK') { throw '用户取消撤回。' }
+    }
+
+    foreach ($operation in $operations) {
+        $kind = [string]$operation.kind
+        switch ($kind) {
+            { $_ -in @('environment', 'directory', 'empty-directory', 'file') } {
+                if (-not (Test-SafeTrackedTarget ([string]$operation.target) ([string]$operation.boundary))) {
+                    throw "撤回前安全检查失败，未执行任何操作：$($operation.target)"
+                }
+            }
+            'system-package' {
+                if ([string]$operation.manager -ne 'winget' -or [string]$operation.target -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]+$') {
+                    throw "撤回前发现无效的 winget 日志项，未执行任何操作：$($operation.target)"
+                }
+            }
+            'python-package' {
+                if ([string]$operation.manager -ne 'pip-user' -or [string]$operation.target -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]+$') {
+                    throw "撤回前发现无效的 Python 包日志项，未执行任何操作：$($operation.target)"
+                }
+            }
+            default { throw "撤回前发现未知日志项 '$kind'，未执行任何操作。" }
+        }
+    }
+
+    $failures = [System.Collections.Generic.List[string]]::new()
+    for ($index = $operations.Count - 1; $index -ge 0; $index--) {
+        $operation = $operations[$index]
+        try {
+            switch ([string]$operation.kind) {
+                { $_ -in @('environment', 'directory', 'empty-directory', 'file') } {
+                    if (-not (Test-SafeTrackedTarget ([string]$operation.target) ([string]$operation.boundary))) {
+                        throw "路径安全边界校验失败：$($operation.target)"
+                    }
+                    if (Test-Path -LiteralPath ([string]$operation.target)) {
+                        if ([string]$operation.kind -eq 'empty-directory') {
+                            if (-not (Get-ChildItem -LiteralPath ([string]$operation.target) -Force | Select-Object -First 1)) {
+                                Remove-Item -LiteralPath ([string]$operation.target) -Force
+                            }
+                        } else {
+                            $recursive = ([string]$operation.kind) -ne 'file'
+                            Remove-Item -LiteralPath ([string]$operation.target) -Force -Recurse:$recursive
+                        }
+                    }
+                }
+                'system-package' {
+                    if ([string]$operation.manager -ne 'winget') { throw "未知系统包管理器：$($operation.manager)" }
+                    $winget = Get-Command winget -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if (-not $winget) { throw '找不到 winget，无法撤回系统软件。' }
+                    if (Test-WingetPackageInstalled $winget.Source ([string]$operation.target)) {
+                        Invoke-External $winget.Source @('uninstall', '--id', [string]$operation.target, '--exact', '--source', 'winget', '--silent', '--disable-interactivity', '--accept-source-agreements') $false | Out-Null
+                    }
+                }
+                'python-package' {
+                    if ([string]$operation.manager -ne 'pip-user') { throw "未知 Python 包管理器：$($operation.manager)" }
+                    $launcher = [string]$operation.details
+                    if (-not (Test-Path -LiteralPath $launcher)) { throw "找不到安装该包时使用的 Python：$launcher" }
+                    & $launcher -m pip show ([string]$operation.target) *> $null
+                    if ($LASTEXITCODE -eq 0) {
+                        Invoke-External $launcher @('-m', 'pip', 'uninstall', '-y', [string]$operation.target) $false | Out-Null
+                    }
+                }
+                default { throw "未知撤回操作类型：$($operation.kind)" }
+            }
+            Write-Host "[DONE] $($operation.kind): $($operation.target)" -ForegroundColor Green
+        } catch {
+            $failures.Add("$($operation.kind): $($operation.target) — $($_.Exception.Message)")
+            Write-Warning $failures[$failures.Count - 1]
+        }
+    }
+    if ($failures.Count -gt 0) {
+        throw "撤回有 $($failures.Count) 项未完成；日志已保留，可修复问题后重试。"
+    }
+    Remove-Item -LiteralPath $journalPath -Force
+    $stateDirectory = Split-Path -Parent $journalPath
+    $stateDirectoryFull = [IO.Path]::GetFullPath($stateDirectory).TrimEnd('\', '/')
+    $stateDriveRoot = [IO.Path]::GetPathRoot($stateDirectoryFull).TrimEnd('\', '/')
+    if ($stateDirectoryFull -ne $stateDriveRoot -and (Test-Path -LiteralPath $stateDirectory) -and
+        -not (Get-ChildItem -LiteralPath $stateDirectory -Force | Select-Object -First 1)) {
+        Remove-Item -LiteralPath $stateDirectory -Force
+    }
+    $expectedModelReadyRoot = Join-Path $env:LOCALAPPDATA 'ModelReady'
+    if (($journal.modelReadyRootCreated -eq $true) -and
+        ([string]$journal.modelReadyRoot -eq $expectedModelReadyRoot) -and
+        (Test-Path -LiteralPath $expectedModelReadyRoot) -and
+        -not (Get-ChildItem -LiteralPath $expectedModelReadyRoot -Force | Select-Object -First 1)) {
+        Remove-Item -LiteralPath $expectedModelReadyRoot -Force
+    }
+    Write-Host '已撤回所有有记录的 ModelReady 环境修改；安装前已存在的软件与用户文件未被触碰。' -ForegroundColor Green
 }
 
 function Show-ModelReadyProfiles {
@@ -493,4 +764,4 @@ function Invoke-ModelReadyVerify {
     }
 }
 
-Export-ModuleMember -Function Invoke-ModelReadyDoctor, Invoke-ModelReadyInstall, Invoke-ModelReadyVerify, Start-ModelReadyJupyter, Uninstall-ModelReadyEnvironment, Show-ModelReadyProfiles, Show-ModelReadyVersion, Get-ProfileClosure, Get-ProfileRequirements
+Export-ModuleMember -Function Invoke-ModelReadyDoctor, Invoke-ModelReadyInstall, Invoke-ModelReadyVerify, Start-ModelReadyJupyter, Uninstall-ModelReadyEnvironment, Invoke-ModelReadyRollback, Show-ModelReadyProfiles, Show-ModelReadyVersion, Get-ProfileClosure, Get-ProfileRequirements
