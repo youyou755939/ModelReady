@@ -6,7 +6,7 @@ ModelReady 的目标不是“把包装上就算完成”，而是安装后实际
 
 ## 快速开始
 
-普通用户可以直接双击 `Doctor-ModelReady.cmd` 体检，或双击 `Install-ModelReady.cmd` 安装完整配置档。
+普通用户可以直接双击 `ModelReady.cmd` 打开菜单。也可以双击 `Doctor-ModelReady.cmd` 体检，或双击 `Install-ModelReady.cmd` 安装完整配置档。
 
 在 PowerShell 中运行：
 
@@ -22,6 +22,19 @@ ModelReady 的目标不是“把包装上就算完成”，而是安装后实际
 
 # 运行可复现的功能验证
 .\modelready.ps1 verify -Profile full
+
+# 修复缺失或损坏的依赖
+.\modelready.ps1 repair -Profile full -Yes
+
+# 启动隔离环境中的 JupyterLab
+.\modelready.ps1 launch -Profile full
+
+# 只删除指定配置档的 Python 隔离环境
+.\modelready.ps1 uninstall -Profile full
+
+# 查看所有配置档或当前版本
+.\modelready.ps1 profiles
+.\modelready.ps1 version
 ```
 
 报告默认写入 `reports/`，Python 虚拟环境默认位于 `%LOCALAPPDATA%\ModelReady\envs\<profile>`。可用 `-EnvironmentRoot` 指定其他位置。
@@ -45,6 +58,8 @@ ModelReady 的目标不是“把包装上就算完成”，而是安装后实际
 - 支持官方 PyPI 和清华 PyPI 镜像切换。
 - 商业软件仅检测，不下载、不破解，也不处理许可证。
 - 每次验证生成 JSON 和 HTML 报告，方便队伍成员互相复现。
+- `repair` 可重复执行并补齐依赖；已存在的隔离环境不会被无故清空。
+- `uninstall` 只允许删除 `EnvironmentRoot` 下对应配置档，不卸载共享系统工具。
 
 ## 当前范围
 
@@ -55,5 +70,13 @@ ModelReady 的目标不是“把包装上就算完成”，而是安装后实际
 ```powershell
 pwsh -NoProfile -File .\tests\smoke.ps1
 ```
+
+生成本地发行包及 SHA-256 校验文件：
+
+```powershell
+.\build.ps1
+```
+
+产物写入 `dist/`，压缩包内只包含运行所需文件，不包含测试、报告或 Git 元数据。
 
 项目采用 [MIT License](LICENSE)。

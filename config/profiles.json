@@ -1,7 +1,9 @@
 {
   "schemaVersion": 1,
+  "productVersion": "0.2.0",
   "pythonVersion": "3.12",
   "uvVersion": "0.12.10",
+  "uvInstallerSha256": "a4925067919bb02c1b2a5d3b4471e8cf20da76567197ab67d451a08d95421c78",
   "indexUrls": {
     "official": "https://pypi.org/simple",
     "china": "https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -9,6 +11,7 @@
   "profiles": {
     "base": {
       "description": "数据分析、科学计算、绘图与 Jupyter",
+      "estimatedDiskGB": 4,
       "pythonPackages": [
         "numpy>=2.0,<3", "pandas>=2.2,<3", "scipy>=1.14,<2",
         "matplotlib>=3.9,<4", "sympy>=1.13,<2", "jupyterlab>=4.2,<5",
@@ -18,6 +21,7 @@
     },
     "optimization": {
       "description": "运筹优化与图论",
+      "estimatedDiskGB": 6,
       "extends": ["base"],
       "pythonPackages": [
         "cvxpy>=1.5,<2", "pulp>=2.9,<4", "ortools>=9.11,<10", "networkx>=3.3,<4"
@@ -26,6 +30,7 @@
     },
     "ml": {
       "description": "统计建模与机器学习",
+      "estimatedDiskGB": 8,
       "extends": ["base"],
       "pythonPackages": [
         "scikit-learn>=1.5,<2", "statsmodels>=0.14,<1", "xgboost>=2.1,<4"
@@ -34,6 +39,7 @@
     },
     "paper": {
       "description": "论文编译、文档转换与流程图",
+      "estimatedDiskGB": 7,
       "extends": ["base"],
       "pythonPackages": [
         "python-docx>=1.1,<2", "pymupdf>=1.24,<2", "pypdf>=5,<7"
@@ -42,6 +48,7 @@
     },
     "full": {
       "description": "完整数学建模竞赛环境",
+      "estimatedDiskGB": 12,
       "extends": ["optimization", "ml", "paper"],
       "pythonPackages": [],
       "systemTools": []

@@ -15,3 +15,6 @@ jobs:
       - name: Install and verify base profile
         shell: pwsh
         run: ./modelready.ps1 install -Profile base -EnvironmentRoot "$env:RUNNER_TEMP\modelready-envs" -Yes -NoReport
+      - name: Build distributable package
+        shell: pwsh
+        run: ./build.ps1 -OutputDirectory "$env:RUNNER_TEMP\dist"

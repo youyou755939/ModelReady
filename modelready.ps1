@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('doctor', 'install', 'verify')]
+    [ValidateSet('doctor', 'install', 'repair', 'verify', 'launch', 'uninstall', 'profiles', 'version')]
     [string]$Command = 'doctor',
 
     [ValidateSet('base', 'optimization', 'ml', 'paper', 'full')]
@@ -30,10 +30,20 @@ $options = @{
     NoReport       = $NoReport.IsPresent
 }
 
-switch ($Command) {
-    'doctor'  { Invoke-ModelReadyDoctor @options }
-    'install' { Invoke-ModelReadyInstall @options }
-    'verify'  { Invoke-ModelReadyVerify @options }
+try {
+    switch ($Command) {
+        'doctor'  { Invoke-ModelReadyDoctor @options }
+        'install' { Invoke-ModelReadyInstall @options }
+        'repair'  { Invoke-ModelReadyInstall @options }
+        'verify'  { Invoke-ModelReadyVerify @options }
+        'launch'  { Start-ModelReadyJupyter @options }
+        'uninstall' { Uninstall-ModelReadyEnvironment @options }
+        'profiles' { Show-ModelReadyProfiles -ProjectRoot $projectRoot }
+        'version' { Show-ModelReadyVersion -ProjectRoot $projectRoot }
+    }
+} catch {
+    Write-Host "ModelReady 失败：$($_.Exception.Message)" -ForegroundColor Red
+    exit 1
 }
 
 # A failed native probe (for example an empty Python launcher) must not leak its

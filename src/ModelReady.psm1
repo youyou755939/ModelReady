@@ -77,6 +77,21 @@ function Get-DoctorResults {
     $requirements = Get-ProfileRequirements $Manifest $Profile
     $results = [System.Collections.Generic.List[object]]::new()
 
+    $isWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $osDetail = "$([Environment]::OSVersion.VersionString); $([Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+    $results.Add((New-CheckResult '系统' 'Windows' ($(if ($isWindows) { 'PASS' } else { 'MISSING' })) $osDetail $true))
+    try {
+        $rootPath = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($EnvironmentRoot))
+        $driveName = $rootPath.TrimEnd('\').TrimEnd(':')
+        $drive = Get-PSDrive -Name $driveName -ErrorAction Stop
+        $freeGB = [math]::Round($drive.Free / 1GB, 1)
+        $requiredGB = [double]$Manifest.profiles.$Profile.estimatedDiskGB
+        $diskStatus = if ($freeGB -ge $requiredGB) { 'PASS' } else { 'MISSING' }
+        $results.Add((New-CheckResult '系统' '磁盘空间' $diskStatus "可用 ${freeGB} GB；建议至少 ${requiredGB} GB" $true))
+    } catch {
+        $results.Add((New-CheckResult '系统' '磁盘空间' 'WARN' "无法读取：$($_.Exception.Message)" $true))
+    }
+
     foreach ($name in @('winget', 'uv', 'code')) {
         $check = Test-CommandAny @($name)
         $required = $false
@@ -137,12 +152,18 @@ function Export-ModelReadyReport {
     $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$base.json" -Encoding UTF8
     $rows = $Results | ForEach-Object {
         $encodedDetail = [System.Net.WebUtility]::HtmlEncode([string]$_.Detail)
-        "<tr><td class='$($_.Status.ToLower())'>$($_.Status)</td><td>$($_.Area)</td><td>$($_.Item)</td><td>$encodedDetail</td></tr>"
+        $encodedArea = [System.Net.WebUtility]::HtmlEncode([string]$_.Area)
+        $encodedItem = [System.Net.WebUtility]::HtmlEncode([string]$_.Item)
+        "<tr><td class='$($_.Status.ToLower())'>$($_.Status)</td><td>$encodedArea</td><td>$encodedItem</td><td>$encodedDetail</td></tr>"
     }
+    $passCount = @($Results | Where-Object Status -eq 'PASS').Count
+    $problemCount = @($Results | Where-Object Status -in @('MISSING', 'FAIL')).Count
+    $noticeCount = @($Results | Where-Object Status -in @('WARN', 'INFO')).Count
     $html = @"
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>ModelReady 报告</title>
-<style>body{font-family:Segoe UI,Microsoft YaHei,sans-serif;max-width:1100px;margin:40px auto;color:#1f2937}table{border-collapse:collapse;width:100%}th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left}.pass{color:#15803d}.missing,.fail{color:#b91c1c}.warn{color:#a16207}.info{color:#64748b}code{background:#f1f5f9;padding:2px 5px}</style></head>
+<style>body{font-family:Segoe UI,Microsoft YaHei,sans-serif;max-width:1100px;margin:40px auto;color:#1f2937}.summary{display:flex;gap:12px;margin:24px 0}.card{padding:14px 20px;border-radius:8px;background:#f8fafc}.card b{font-size:22px}table{border-collapse:collapse;width:100%}th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left}.pass{color:#15803d}.missing,.fail{color:#b91c1c}.warn{color:#a16207}.info{color:#64748b}code{background:#f1f5f9;padding:2px 5px}</style></head>
 <body><h1>ModelReady $Kind 报告</h1><p>配置档：<code>$Profile</code>　生成时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss K')</p>
+<div class="summary"><div class="card"><b class="pass">$passCount</b><br>通过</div><div class="card"><b class="fail">$problemCount</b><br>问题</div><div class="card"><b class="info">$noticeCount</b><br>提示</div></div>
 <table><thead><tr><th>状态</th><th>区域</th><th>项目</th><th>详情</th></tr></thead><tbody>$($rows -join "`n")</tbody></table></body></html>
 "@
     Set-Content -LiteralPath "$base.html" -Value $html -Encoding UTF8
@@ -168,7 +189,7 @@ function Confirm-Install {
 }
 
 function Resolve-UvCommand {
-    param([bool]$DryRun, [string]$Version)
+    param([bool]$DryRun, [string]$Version, [string]$ExpectedSha256)
     function Find-Uv {
         $command = Get-Command uv -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($command) { return $command.Source }
@@ -205,6 +226,11 @@ function Resolve-UvCommand {
         Write-Host "> 下载官方 uv $Version 安装脚本" -ForegroundColor DarkCyan
         try {
             Invoke-WebRequest -Uri $installerUrl -OutFile $temporaryInstaller -UseBasicParsing
+            $actualSha256 = (Get-FileHash -LiteralPath $temporaryInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSha256 -ne $ExpectedSha256.ToLowerInvariant()) {
+                throw "uv 安装脚本 SHA-256 不匹配；期望 $ExpectedSha256，实际 $actualSha256。已拒绝执行。"
+            }
+            Write-Host "uv 安装脚本 SHA-256 验证通过。" -ForegroundColor Green
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $temporaryInstaller
             if ($LASTEXITCODE -ne 0) { throw "uv 官方安装程序失败（退出码 $LASTEXITCODE）" }
         } finally {
@@ -327,13 +353,17 @@ function Invoke-ModelReadyInstall {
     Install-SystemTools $manifest $requirements.SystemTools $DryRun
     if (-not $DryRun) { Update-ProcessPath }
 
-    $uv = Resolve-UvCommand -DryRun $DryRun -Version ([string]$manifest.uvVersion)
+    $uv = Resolve-UvCommand -DryRun $DryRun -Version ([string]$manifest.uvVersion) -ExpectedSha256 ([string]$manifest.uvInstallerSha256)
     $environment = Join-Path $EnvironmentRoot $Profile
     $pythonVersion = [string]$manifest.pythonVersion
     Invoke-External $uv.File (@($uv.Prefix) + @('python', 'install', $pythonVersion)) $DryRun | Out-Null
-    Invoke-External $uv.File (@($uv.Prefix) + @('venv', '--python', $pythonVersion, $environment)) $DryRun | Out-Null
-
     $environmentPython = Join-Path $environment 'Scripts\python.exe'
+    if ($DryRun -or -not (Test-Path -LiteralPath $environmentPython)) {
+        Invoke-External $uv.File (@($uv.Prefix) + @('venv', '--python', $pythonVersion, $environment)) $DryRun | Out-Null
+    } else {
+        Write-Host "[SKIP] 隔离环境已存在：$environment"
+    }
+
     $indexUrl = [string]$manifest.indexUrls.$Source
     $arguments = @($uv.Prefix) + @('pip', 'install', '--python', $environmentPython, '--index-url', $indexUrl) + @($requirements.PythonPackages)
     Invoke-External $uv.File $arguments $DryRun | Out-Null
@@ -348,7 +378,81 @@ function Invoke-ModelReadyInstall {
     & $uv.File @freezeArguments | Set-Content -LiteralPath $lockPath -Encoding UTF8
     if ($LASTEXITCODE -ne 0) { throw "无法生成精确版本清单：$lockPath" }
     Write-Host "精确版本清单：$lockPath"
+    $installationState = [ordered]@{
+        schemaVersion = 1
+        productVersion = [string]$manifest.productVersion
+        installedAt = (Get-Date).ToString('o')
+        profile = $Profile
+        source = $Source
+        pythonVersion = $pythonVersion
+        environment = $environment
+        lockFile = $lockPath
+    }
+    $installationState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $environment 'modelready-installation.json') -Encoding UTF8
     Invoke-ModelReadyVerify -ProjectRoot $ProjectRoot -Profile $Profile -Source $Source -EnvironmentRoot $EnvironmentRoot -DryRun:$false -Yes:$true -NoReport:$NoReport
+}
+
+function Start-ModelReadyJupyter {
+    [CmdletBinding()]
+    param([string]$ProjectRoot, [string]$Profile, [string]$Source, [string]$EnvironmentRoot, [bool]$DryRun, [bool]$Yes, [bool]$NoReport)
+    $python = Get-EnvironmentPython $EnvironmentRoot $Profile
+    if (-not $python) { throw "未找到配置档 '$Profile'。请先执行 install。" }
+    if ($DryRun) {
+        Write-Host "[DRY-RUN] $python -m jupyter lab" -ForegroundColor Cyan
+        return
+    }
+    Write-Host "正在启动 $Profile 环境的 JupyterLab；关闭服务请按 Ctrl+C。" -ForegroundColor Green
+    & $python -m jupyter lab
+    if ($LASTEXITCODE -ne 0) { throw "JupyterLab 退出码 $LASTEXITCODE" }
+}
+
+function Uninstall-ModelReadyEnvironment {
+    [CmdletBinding()]
+    param([string]$ProjectRoot, [string]$Profile, [string]$Source, [string]$EnvironmentRoot, [bool]$DryRun, [bool]$Yes, [bool]$NoReport)
+    $rootFull = [IO.Path]::GetFullPath($EnvironmentRoot).TrimEnd('\', '/')
+    $targetFull = [IO.Path]::GetFullPath((Join-Path $rootFull $Profile)).TrimEnd('\', '/')
+    $pathRoot = [IO.Path]::GetPathRoot($rootFull).TrimEnd('\', '/')
+    if ($rootFull -eq $pathRoot -or $targetFull -eq $rootFull) {
+        throw '拒绝删除：环境根目录过于宽泛。'
+    }
+    $expectedPrefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+    if (-not $targetFull.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw '拒绝删除：目标不在指定的 EnvironmentRoot 内。'
+    }
+    if (-not (Test-Path -LiteralPath $targetFull)) {
+        Write-Host "配置档 '$Profile' 尚未安装：$targetFull"
+        return
+    }
+    if ($DryRun) {
+        Write-Host "[DRY-RUN] 删除隔离环境：$targetFull" -ForegroundColor Cyan
+        return
+    }
+    if (-not $Yes) {
+        $answer = Read-Host "将永久删除配置档 '$Profile' 的隔离环境。输入 UNINSTALL 继续"
+        if ($answer -cne 'UNINSTALL') { throw '用户取消卸载。' }
+    }
+    Remove-Item -LiteralPath $targetFull -Recurse -Force
+    Write-Host "已删除隔离环境：$targetFull" -ForegroundColor Green
+    Write-Host '系统级工具（Pandoc、Graphviz、LaTeX）未被删除。'
+}
+
+function Show-ModelReadyProfiles {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    $manifest = Get-ModelReadyManifest $ProjectRoot
+    $rows = foreach ($property in $manifest.profiles.PSObject.Properties) {
+        [pscustomobject]@{
+            Profile = $property.Name
+            DiskGB = $property.Value.estimatedDiskGB
+            Description = $property.Value.description
+        }
+    }
+    $rows | Format-Table -AutoSize
+}
+
+function Show-ModelReadyVersion {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    $manifest = Get-ModelReadyManifest $ProjectRoot
+    Write-Host "ModelReady $($manifest.productVersion)"
 }
 
 function Invoke-ModelReadyVerify {
@@ -389,4 +493,4 @@ function Invoke-ModelReadyVerify {
     }
 }
 
-Export-ModuleMember -Function Invoke-ModelReadyDoctor, Invoke-ModelReadyInstall, Invoke-ModelReadyVerify, Get-ProfileClosure, Get-ProfileRequirements
+Export-ModuleMember -Function Invoke-ModelReadyDoctor, Invoke-ModelReadyInstall, Invoke-ModelReadyVerify, Start-ModelReadyJupyter, Uninstall-ModelReadyEnvironment, Show-ModelReadyProfiles, Show-ModelReadyVersion, Get-ProfileClosure, Get-ProfileRequirements
