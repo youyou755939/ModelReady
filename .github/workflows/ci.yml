@@ -1,0 +1,17 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  powershell-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run smoke tests
+        shell: pwsh
+        run: ./tests/smoke.ps1
+      - name: Install and verify base profile
+        shell: pwsh
+        run: ./modelready.ps1 install -Profile base -EnvironmentRoot "$env:RUNNER_TEMP\modelready-envs" -Yes -NoReport

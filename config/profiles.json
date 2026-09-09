@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "pythonVersion": "3.12",
+  "uvVersion": "0.12.10",
+  "indexUrls": {
+    "official": "https://pypi.org/simple",
+    "china": "https://pypi.tuna.tsinghua.edu.cn/simple"
+  },
+  "profiles": {
+    "base": {
+      "description": "数据分析、科学计算、绘图与 Jupyter",
+      "pythonPackages": [
+        "numpy>=2.0,<3", "pandas>=2.2,<3", "scipy>=1.14,<2",
+        "matplotlib>=3.9,<4", "sympy>=1.13,<2", "jupyterlab>=4.2,<5",
+        "openpyxl>=3.1,<4", "xlrd>=2.0,<3", "pillow>=10,<13"
+      ],
+      "systemTools": []
+    },
+    "optimization": {
+      "description": "运筹优化与图论",
+      "extends": ["base"],
+      "pythonPackages": [
+        "cvxpy>=1.5,<2", "pulp>=2.9,<4", "ortools>=9.11,<10", "networkx>=3.3,<4"
+      ],
+      "systemTools": []
+    },
+    "ml": {
+      "description": "统计建模与机器学习",
+      "extends": ["base"],
+      "pythonPackages": [
+        "scikit-learn>=1.5,<2", "statsmodels>=0.14,<1", "xgboost>=2.1,<4"
+      ],
+      "systemTools": []
+    },
+    "paper": {
+      "description": "论文编译、文档转换与流程图",
+      "extends": ["base"],
+      "pythonPackages": [
+        "python-docx>=1.1,<2", "pymupdf>=1.24,<2", "pypdf>=5,<7"
+      ],
+      "systemTools": ["pandoc", "graphviz", "latex-or-typst"]
+    },
+    "full": {
+      "description": "完整数学建模竞赛环境",
+      "extends": ["optimization", "ml", "paper"],
+      "pythonPackages": [],
+      "systemTools": []
+    }
+  },
+  "systemTools": {
+    "pandoc": {
+      "commands": ["pandoc"],
+      "wingetId": "JohnMacFarlane.Pandoc",
+      "required": true
+    },
+    "graphviz": {
+      "commands": ["dot"],
+      "wingetId": "Graphviz.Graphviz",
+      "required": true
+    },
+    "latex-or-typst": {
+      "commandsAny": ["xelatex", "typst"],
+      "wingetId": "MiKTeX.MiKTeX",
+      "required": true
+    }
+  },
+  "optionalCommercialTools": {
+    "MATLAB": ["matlab"],
+    "Gurobi": ["gurobi_cl"],
+    "COPT": ["copt_cmd", "copt"]
+  }
+}
