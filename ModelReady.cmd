@@ -5,7 +5,7 @@ cd /d "%~dp0"
 :menu
 cls
 echo ==================================================
-echo ModelReady 0.2 - Mathematical Modeling Environment
+echo ModelReady 0.3 - Mathematical Modeling Environment
 echo ==================================================
 echo 1. Check full environment
 echo 2. Install base profile

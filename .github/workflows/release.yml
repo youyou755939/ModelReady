@@ -18,7 +18,12 @@ jobs:
         run: ./tests/smoke.ps1
       - name: Build zip and checksum
         shell: pwsh
-        run: ./build.ps1 -OutputDirectory .
+        run: |
+          $manifest = Get-Content ./config/profiles.json -Raw | ConvertFrom-Json
+          if ("v$($manifest.productVersion)" -ne "${{ github.ref_name }}") {
+            throw "标签 ${{ github.ref_name }} 与清单版本 v$($manifest.productVersion) 不一致"
+          }
+          ./build.ps1 -OutputDirectory .
       - name: Publish GitHub release
         shell: pwsh
         env:
@@ -26,5 +31,7 @@ jobs:
         run: |
           $zips = @(Get-ChildItem -File 'ModelReady-*-windows-x64.zip')
           if ($zips.Count -ne 1) { throw "期望一个发行包，实际找到 $($zips.Count) 个" }
-          $zip = $zips[0]
-          gh release create "${{ github.ref_name }}" $zip.FullName "$($zip.FullName).sha256" --generate-notes
+          $archives = @(Get-ChildItem -File 'ModelReady-*-linux-x64.tar.gz')
+          if ($archives.Count -ne 1) { throw "期望一个 Linux 发行包，实际找到 $($archives.Count) 个" }
+          $assets = @($zips[0].FullName, "$($zips[0].FullName).sha256", $archives[0].FullName, "$($archives[0].FullName).sha256")
+          gh release create "${{ github.ref_name }}" @assets --generate-notes

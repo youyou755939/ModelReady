@@ -1,5 +1,17 @@
 # 更新记录
 
+## 0.3.0 - 2026-09-09
+
+- 增加 Ubuntu 22.04/24.04、Debian 12 和对应 WSL2 支持。
+- 新增 Bash CLI，并覆盖体检、安装、修复、验证、启动和安全卸载。
+- Linux 使用 `apt` 安装 Pandoc、Graphviz、TeX Live 与 Noto CJK 字体。
+- Windows 和 Linux 共用配置档、Python 功能验证及 HTML/JSON 报告格式。
+- uv Linux 固定版本引导脚本增加 SHA-256 校验。
+- CI 增加 Ubuntu 22.04/24.04 的真实基础环境安装验证。
+- 增加 Linux 生命周期烟雾测试和危险卸载路径拒绝测试。
+- 本地构建同时生成 Windows ZIP 和 Linux `tar.gz`。
+- Release 发布前检查 Git 标签与产品版本是否一致。
+
 ## 0.2.0 - 2026-09-09
 
 - 增加双击启动的统一菜单 `ModelReady.cmd`。

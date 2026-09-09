@@ -1,9 +1,10 @@
 {
   "schemaVersion": 1,
-  "productVersion": "0.2.0",
+  "productVersion": "0.3.0",
   "pythonVersion": "3.12",
   "uvVersion": "0.12.10",
   "uvInstallerSha256": "a4925067919bb02c1b2a5d3b4471e8cf20da76567197ab67d451a08d95421c78",
+  "uvInstallerSha256Linux": "a3196b75f697a1adaa5e4af34ffba7629c710931ab1dac33bab59ecf228080bb",
   "indexUrls": {
     "official": "https://pypi.org/simple",
     "china": "https://pypi.tuna.tsinghua.edu.cn/simple"

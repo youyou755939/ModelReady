@@ -1,10 +1,12 @@
 # ModelReady
 
-面向中文数学建模竞赛的 Windows 环境安装、体检与验证工具。
+面向中文数学建模竞赛的 Windows、Ubuntu、Debian 与 WSL2 环境安装、体检和验证工具。
 
 ModelReady 的目标不是“把包装上就算完成”，而是安装后实际运行一组最小建模任务，证明 Python、数据处理、优化、机器学习、中文绘图和论文工具链能够工作。
 
 ## 快速开始
+
+### Windows
 
 普通用户可以直接双击 `ModelReady.cmd` 打开菜单。也可以双击 `Doctor-ModelReady.cmd` 体检，或双击 `Install-ModelReady.cmd` 安装完整配置档。
 
@@ -39,6 +41,26 @@ ModelReady 的目标不是“把包装上就算完成”，而是安装后实际
 
 报告默认写入 `reports/`，Python 虚拟环境默认位于 `%LOCALAPPDATA%\ModelReady\envs\<profile>`。可用 `-EnvironmentRoot` 指定其他位置。
 
+### Ubuntu、Debian 与 WSL2
+
+```bash
+# 体检，不修改系统
+bash ./modelready.sh doctor --profile full
+
+# 预览安装操作
+bash ./modelready.sh install --profile full --dry-run
+
+# 安装并验证完整环境
+bash ./modelready.sh install --profile full --yes
+
+# 修复、验证和启动 JupyterLab
+bash ./modelready.sh repair --profile full --yes
+bash ./modelready.sh verify --profile full
+bash ./modelready.sh launch --profile full
+```
+
+Linux 默认将隔离环境写入 `${XDG_DATA_HOME:-$HOME/.local/share}/modelready/envs/<profile>`，报告写入 `${XDG_STATE_HOME:-$HOME/.local/state}/modelready/reports`。系统包通过 `apt` 安装，非 root 用户需要 `sudo`。
+
 ## 配置档
 
 | 配置档 | 内容 |
@@ -63,7 +85,7 @@ ModelReady 的目标不是“把包装上就算完成”，而是安装后实际
 
 ## 当前范围
 
-首版聚焦 Windows 10/11。系统软件优先通过 `winget` 安装；缺少 `winget` 时，Python 环境仍可由固定版本的 uv 官方安装程序引导，但 Pandoc、Graphviz 等系统工具需要用户先安装 Windows App Installer 或手动安装。MATLAB、Gurobi、COPT 等商业工具只进入检测诊断报告。
+目前支持 Windows 10/11、Ubuntu 22.04/24.04、Debian 12，以及基于这些发行版的 WSL2。Windows 系统软件优先通过 `winget` 安装；Linux/WSL2 使用 `apt`。MATLAB、Gurobi、COPT 等商业工具只进入检测诊断报告。
 
 ## 开发验证
 
@@ -77,6 +99,6 @@ pwsh -NoProfile -File .\tests\smoke.ps1
 .\build.ps1
 ```
 
-产物写入 `dist/`，压缩包内只包含运行所需文件，不包含测试、报告或 Git 元数据。
+产物写入 `dist/`，同时生成 Windows ZIP、Linux `tar.gz` 及对应 SHA-256 文件。压缩包内只包含运行所需文件，不包含测试、报告或 Git 元数据。
 
 项目采用 [MIT License](LICENSE)。

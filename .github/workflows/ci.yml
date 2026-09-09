@@ -18,3 +18,15 @@ jobs:
       - name: Build distributable package
         shell: pwsh
         run: ./build.ps1 -OutputDirectory "$env:RUNNER_TEMP\dist"
+
+  linux:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: bash ./tests/linux-smoke.sh
+      - name: Install and verify base profile
+        run: bash ./modelready.sh install --profile base --environment-root "$RUNNER_TEMP/modelready-envs" --yes --no-report

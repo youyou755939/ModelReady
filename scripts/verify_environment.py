@@ -79,8 +79,9 @@ def check_plot(output_dir: Path) -> str:
     from matplotlib import font_manager, rcParams
 
     preferred_fonts = [
-        "Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "Source Han Sans SC",
-        "WenQuanYi Zen Hei",
+        "Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "Noto Sans CJK JP",
+        "Noto Sans CJK TC", "Noto Sans CJK HK", "Noto Sans CJK KR",
+        "Source Han Sans SC", "WenQuanYi Zen Hei",
     ]
     installed_fonts = {font.name for font in font_manager.fontManager.ttflist}
     selected_font = next((name for name in preferred_fonts if name in installed_fonts), None)

@@ -14,6 +14,7 @@ $manifest = Get-Content -LiteralPath (Join-Path $root 'config\profiles.json') -R
 if ($manifest.schemaVersion -ne 1) { throw 'profiles.json schemaVersion 不正确' }
 if ($manifest.productVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'productVersion 不是语义化版本' }
 if ($manifest.uvInstallerSha256 -notmatch '^[a-f0-9]{64}$') { throw 'uvInstallerSha256 格式不正确' }
+if ($manifest.uvInstallerSha256Linux -notmatch '^[a-f0-9]{64}$') { throw 'uvInstallerSha256Linux 格式不正确' }
 
 Import-Module (Join-Path $root 'src\ModelReady.psm1') -Force
 $full = Get-ProfileRequirements $manifest 'full'

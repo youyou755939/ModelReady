@@ -20,19 +20,25 @@ if (-not $stageFull.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnor
 $packageRoot = Join-Path $stageFull "ModelReady-$version"
 $zipPath = Join-Path $outputFull "ModelReady-$version-windows-x64.zip"
 $checksumPath = "$zipPath.sha256"
+$tarPath = Join-Path $outputFull "ModelReady-$version-linux-x64.tar.gz"
+$tarChecksumPath = "$tarPath.sha256"
 
 try {
     New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
     $files = @(
         'modelready.ps1', 'ModelReady.cmd', 'Install-ModelReady.cmd',
-        'Doctor-ModelReady.cmd', 'README.md', 'CHANGELOG.md', 'SECURITY.md', 'LICENSE'
+        'Doctor-ModelReady.cmd', 'modelready.sh', 'README.md', 'CHANGELOG.md', 'SECURITY.md', 'LICENSE'
     )
     foreach ($file in $files) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $packageRoot
     }
     $runtimeFiles = @(
         'config\profiles.json',
+        'scripts\manifest_query.py',
+        'scripts\render_report.py',
         'scripts\verify_environment.py',
+        'scripts\verify_system.py',
+        'scripts\write_install_state.py',
         'src\ModelReady.psm1'
     )
     foreach ($relativePath in $runtimeFiles) {
@@ -43,9 +49,15 @@ try {
     Compress-Archive -Path $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal -Force
     $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath $checksumPath -Value "$hash  $(Split-Path -Leaf $zipPath)" -Encoding ASCII
+    & tar.exe -czf $tarPath -C $stageFull "ModelReady-$version"
+    if ($LASTEXITCODE -ne 0) { throw "无法生成 Linux tar.gz：$tarPath" }
+    $tarHash = (Get-FileHash -LiteralPath $tarPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath $tarChecksumPath -Value "$tarHash  $(Split-Path -Leaf $tarPath)" -Encoding ASCII
 } finally {
     if (Test-Path -LiteralPath $stageFull) { Remove-Item -LiteralPath $stageFull -Recurse -Force }
 }
 
 Write-Host "发行包：$zipPath" -ForegroundColor Green
 Write-Host "校验值：$checksumPath"
+Write-Host "Linux 包：$tarPath" -ForegroundColor Green
+Write-Host "校验值：$tarChecksumPath"
