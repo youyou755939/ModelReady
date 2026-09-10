@@ -4,10 +4,38 @@
 [![Release](https://img.shields.io/github/v/release/youyou755939/ModelReady?include_prereleases)](https://github.com/youyou755939/ModelReady/releases)
 [![License](https://img.shields.io/github/license/youyou755939/ModelReady)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Ubuntu%20%7C%20Debian%20%7C%20WSL2-blue)](#平台支持)
+[![Rollback](https://img.shields.io/badge/rollback-one--click-brightgreen)](#核心亮点一键恢复到安装前)
 
-面向中文数学建模竞赛的环境安装、体检、修复、验证与完整回滚工具。
+**装得完整，也退得干净。** 面向中文数学建模竞赛的环境安装、体检、修复、验证与完整回滚工具。
 
 ModelReady 不以“依赖安装命令执行完毕”为完成标准。它会实际运行 Excel 读写、科学计算、优化求解、机器学习、中文绘图和论文编译任务，并生成可审计的 HTML/JSON 报告。
+
+> [!IMPORTANT]
+> **不想保留环境时，可以一键恢复。** ModelReady 0.4+ 会在安装前记录相关软件和目录是否已经存在，只撤回本项目后来新增的软件与环境。Windows 用户直接双击 `Rollback-ModelReady.cmd`；Linux / WSL2 用户执行 `bash modelready.sh rollback --yes`。
+
+## 核心亮点：一键恢复到安装前
+
+传统环境脚本通常只负责“装”，ModelReady 同时设计了可审计的“退”。
+
+```text
+记录安装前基线  →  安装独立环境  →  功能验证  →  随时预览或一键回滚
+```
+
+| 阶段 | ModelReady 的处理方式 |
+| --- | --- |
+| 安装前 | 检查软件和目录是否已经存在，只登记新增项 |
+| 安装中 | 每一步执行前写入持久化日志，中途失败也能继续撤回 |
+| 回滚时 | 反向处理日志；路径越界或危险连带卸载会被拒绝 |
+| 回滚后 | 保留用户 Notebook、论文、报告和安装前已有的软件 |
+
+最快使用方式：
+
+```text
+Windows：双击 Rollback-ModelReady.cmd
+Linux：  bash modelready.sh rollback --yes
+```
+
+想先确认将删除什么，可使用 `rollback -DryRun`（Windows）或 `rollback --dry-run`（Linux）。完整边界说明见[回滚范围与安全边界](#回滚范围与安全边界)。
 
 ## 为什么使用 ModelReady
 
@@ -101,7 +129,7 @@ Linux 使用 `apt` 安装系统组件，非 root 用户需要 `sudo`。默认位
 报告：${XDG_STATE_HOME:-$HOME/.local/state}/modelready/reports
 ```
 
-## 一键恢复到安装前
+## 回滚范围与安全边界
 
 从 0.4.0 开始，ModelReady 在执行每项安装操作前都会保存变更日志。回滚时按相反顺序处理，只删除安装前不存在且由本项目新增的资源：
 
