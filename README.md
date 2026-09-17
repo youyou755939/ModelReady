@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/youyou755939/ModelReady)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Ubuntu%20%7C%20Debian%20%7C%20WSL2-blue)](#平台支持)
 [![Rollback](https://img.shields.io/badge/rollback-one--click-brightgreen)](#核心亮点一键恢复到安装前)
- 
+
 **装得完整，也退得干净。** 面向中文数学建模竞赛的环境安装、体检、修复、验证与完整回滚工具。
 
 ModelReady 不以“依赖安装命令执行完毕”为完成标准。它会实际运行 Excel 读写、科学计算、优化求解、机器学习、中文绘图和论文编译任务，并生成可审计的 HTML/JSON 报告。
